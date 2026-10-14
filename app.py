@@ -3,8 +3,17 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 from analysis import load_metrics, score_metrics, make_demo_data
+from collectors.youtube_comments import fetch_comment_threads
+import re
 
 st.set_page_config(page_title="TrendTier | 유행어 트렌드", page_icon="📈", layout="wide")
+
+# Streamlit Community Cloud secrets -> environment variable used by collector.
+try:
+    if st.secrets.get("YOUTUBE_API_KEY"):
+        os.environ["YOUTUBE_API_KEY"] = st.secrets["YOUTUBE_API_KEY"]
+except Exception:
+    pass
 
 st.markdown("""
 <style>
@@ -38,6 +47,56 @@ with st.sidebar:
     sort_by = st.selectbox("정렬 기준", ["종합 점수", "검색 관심도", "댓글 언급률", "상승 신호"])
     st.divider()
     st.caption("실데이터 연결은 API 권한·정책 및 환경변수 설정이 필요합니다.")
+    st.divider()
+    st.subheader("YouTube 댓글 실험")
+    video_input = st.text_area(
+        "YouTube 영상 URL 또는 영상 ID",
+        placeholder="영상 URL/ID를 한 줄에 하나씩 입력 (최대 3개 권장)",
+        help="공개 댓글이 허용된 영상만 가능합니다. API 할당량을 아끼기 위해 처음에는 1~3개로 테스트하세요."
+    )
+    if st.button("공개 댓글 수집 및 유행어 언급 분석", type="primary"):
+        video_ids = []
+        for line in video_input.splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            match = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})", value)
+            video_id = match.group(1) if match else value
+            if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                video_ids.append(video_id)
+        video_ids = list(dict.fromkeys(video_ids))[:3]
+        if not video_ids:
+            st.error("유효한 YouTube 영상 URL 또는 11자리 영상 ID를 입력해 주세요.")
+        elif not os.getenv("YOUTUBE_API_KEY"):
+            st.error("API 키를 찾지 못했습니다. Streamlit의 Manage app → Settings → Secrets에 YOUTUBE_API_KEY를 저장했는지 확인하세요.")
+        else:
+            all_comments = []
+            failures = []
+            with st.spinner("공개 댓글을 수집하고 있습니다. 잠시 기다려 주세요..."):
+                for video_id in video_ids:
+                    try:
+                        all_comments.extend(fetch_comment_threads(video_id, max_pages=1, max_results=100))
+                    except Exception as exc:
+                        failures.append(f"{video_id}: {exc}")
+            if failures:
+                for failure in failures:
+                    st.warning(failure)
+            if all_comments:
+                comments_df = pd.DataFrame(all_comments)
+                texts = comments_df["text"].fillna("").astype(str)
+                st.success(f"댓글 {len(comments_df):,}개 수집 완료 · 영상 {len(video_ids)}개 입력")
+                st.caption("표본은 입력한 영상의 최신 공개 댓글 최대 100개/영상입니다. 한국 10~20대 전체의 대표 표본은 아닙니다.")
+                live_rows = []
+                for _, item in raw.iterrows():
+                    term = str(item["term"])
+                    mentions = int(texts.str.contains(re.escape(term), case=False, regex=True, na=False).sum())
+                    live_rows.append({"유행어": term, "언급 댓글 수": mentions, "수집 댓글 대비 언급률(%)": round(mentions / len(texts) * 100, 2)})
+                live_df = pd.DataFrame(live_rows).sort_values(["언급 댓글 수", "유행어"], ascending=[False, True])
+                st.subheader("입력한 영상의 공개 댓글 기준 언급 순위")
+                st.dataframe(live_df, hide_index=True, use_container_width=True)
+                st.caption("이 표만이 이번 실행에서 실제 수집한 YouTube 댓글 기반 결과입니다. 메인 대시보드의 검색 관심도와 종합 점수는 아직 데모 데이터입니다.")
+            else:
+                st.error("댓글을 가져오지 못했습니다. 댓글 사용 중지 여부, 영상 ID, API 활성화 및 할당량을 확인하세요.")
 
 filtered = df[df["tier"].isin(tiers)].copy()
 if query:
