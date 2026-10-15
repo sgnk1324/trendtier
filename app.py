@@ -27,10 +27,11 @@ st.markdown('<div class="hero"><h1>📈 TREND TIER</h1><p>한국 인터넷 유�
 st.write("검색 관심도와 공개 댓글 신호를 비교해 유행어 순위를 탐색하는 초기 버전입니다.")
 
 source_mode = os.getenv("DATA_MODE", "demo").lower()
-if source_mode != "live":
-    st.info("현재 데모 데이터 모드입니다. 아래 수치와 순위는 예시이며 실제 검색량·댓글 통계가 아닙니다.")
-else:
-    st.warning("실데이터 모드가 설정되어 있습니다. 각 데이터 소스의 연결 상태와 수집 시각을 확인하세요.")
+
+st.info(
+    "데이터 안내: 검색 관심도는 아직 실제 검색량이 아닐 수 있습니다. "
+    "댓글 지표는 수집 데이터 연결 여부와 표본에 따라 달라집니다."
+)
 
 try:
     raw = load_metrics()
