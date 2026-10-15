@@ -122,7 +122,12 @@ def fetch_comment_threads(video_id, max_pages=1, max_results=None):
 
 
 def fetch_comments(video_url_or_id, max_results=100, max_pages=None):
-    """Compatibility alias for callers using fetch_comments."""
-    if max_pages is None:
-        max_pages = max(1, (int(max_results) + 99) // 100)
+    """기존 수집 프로그램과의 호환성을 유지한다."""
+    if max_pages is not None:
+        max_results = min(max_results, max_pages * 100)
+
     return fetch_comment_threads(
+        video_url_or_id,
+        max_results=max_results,
+        max_pages=max_pages,
+    )
