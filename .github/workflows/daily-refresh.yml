@@ -1,0 +1,44 @@
+name: TrendTier daily YouTube refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 21:15 UTC = 06:15 Korea Standard Time (KST), every day
+    - cron: '15 21 * * *'
+  push:
+    paths:
+      - 'daily_collect.py'
+      - 'collectors/**'
+      - 'data/youtube_videos.txt'
+      - '.github/workflows/daily-refresh.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pandas requests
+      - name: Collect public YouTube comments and calculate term mentions
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: python daily_collect.py
+      - name: Commit refreshed data
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/comment_metrics.csv data/comment_history.csv
+          if git diff --cached --quiet; then
+            echo 'No data changes to commit.'
+          else
+            git commit -m 'Update daily YouTube comment metrics'
+            git push
+          fi
