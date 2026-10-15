@@ -26,7 +26,14 @@ def fetch_comment_threads(video_id: str, max_pages: int = 1, max_results: int = 
         if page_token:
             params["pageToken"] = page_token
         response = requests.get(API_URL, params=params, timeout=30)
-        response.raise_for_status()
+        if not response.ok:
+    try:
+        error_detail = response.json()
+    except ValueError:
+        error_detail = response.text
+    raise RuntimeError(
+        f"YouTube API 오류 (HTTP {response.status_code}): {error_detail}"
+    )
         data = response.json()
         for item in data.get("items", []):
             snippet = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
