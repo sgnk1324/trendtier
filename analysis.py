@@ -1,226 +1,245 @@
 
+"""TrendTier: daily YouTube comment collection."""
+
 import os
-import sqlite3
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-
-DB_PATH = Path(os.getenv("DB_PATH", "trendtier.db"))
-METRICS_CSV = Path(os.getenv("METRICS_CSV", "data/metrics.csv"))
-COMMENT_METRICS_CSV = Path(
-    os.getenv("COMMENT_METRICS_CSV", "data/comment_metrics.csv")
-)
+from collectors.youtube_comments import fetch_comment_threads
 
 
-def make_demo_data():
-    rows = [
-        ("알잘딱깔센", "알아서 잘 딱 깔끔하고 센스 있게", 82, 0.91, 78, 0.83),
-        ("폼 미쳤다", "실력이나 분위기가 매우 좋다는 표현", 74, 0.74, 63, 0.69),
-        ("억까", "억지로 비난하거나 불리하게 몰아가는 상황", 69, 0.66, 58, 0.61),
-        ("킹받네", "매우 짜증 나지만 웃긴 상황", 62, 0.72, 41, 0.53),
-        ("갓생", "성실하고 계획적으로 사는 생활", 57, 0.38, 32, 0.42),
-        ("중꺾마", "중요한 것은 꺾이지 않는 마음", 51, 0.31, 26, 0.35),
-        ("내또출", "내일 또 출근", 45, 0.27, 39, 0.47),
-        ("럭키비키", "긍정적으로 해석하는 태도", 43, 0.58, 48, 0.74),
-        ("스불재", "스스로 불러온 재앙", 38, 0.23, 21, 0.29),
-        ("완내스", "완전 내 스타일", 34, 0.18, 17, 0.24),
-        ("오히려 좋아", "상황을 긍정적으로 받아들이는 말", 31, 0.24, 13, 0.18),
-        ("쩐다", "대단하거나 놀랍다는 표현", 29, 0.42, 9, 0.12),
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "data"
+
+VIDEOS_FILE = DATA_DIR / "youtube_videos.txt"
+TERMS_FILE = DATA_DIR / "metrics.csv"
+OUTPUT_FILE = DATA_DIR / "comment_metrics.csv"
+HISTORY_FILE = DATA_DIR / "comment_history.csv"
+RAW_COMMENTS_FILE = DATA_DIR / "comment_texts.csv"
+
+
+def load_video_ids():
+    if not VIDEOS_FILE.exists():
+        raise FileNotFoundError(
+            f"영상 목록 파일이 없습니다: {VIDEOS_FILE}"
+        )
+
+    ids = []
+
+    for raw in VIDEOS_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        match = re.search(
+            r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})",
+            line,
+        )
+        video_id = match.group(1) if match else line
+
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            ids.append(video_id)
+        else:
+            print(f"Skipping invalid video entry: {line}")
+
+    return list(dict.fromkeys(ids))
+
+
+def main():
+    if not os.getenv("YOUTUBE_API_KEY"):
+        raise RuntimeError("YOUTUBE_API_KEY secret is missing")
+
+    video_ids = load_video_ids()
+
+    if not video_ids:
+        raise RuntimeError("유효한 YouTube 영상 URL이 없습니다.")
+
+    terms_df = pd.read_csv(TERMS_FILE)
+
+    if "term" not in terms_df.columns:
+        raise ValueError("data/metrics.csv에 term 컬럼이 없습니다.")
+
+    terms = [
+        str(value).strip()
+        for value in terms_df["term"].dropna()
+        if str(value).strip()
     ]
 
-    return pd.DataFrame(
-        rows,
-        columns=[
-            "term",
-            "meaning",
-            "search_index",
-            "comment_rate",
-            "search_growth",
-            "comment_growth",
-        ],
-    )
+    all_comments = []
+    successful_videos = 0
 
-
-def load_metrics():
-    """검색 지표와 최신 YouTube 댓글 지표를 결합한다."""
-
-    # 1. 검색 지표 또는 기본 데이터를 불러온다.
-    if METRICS_CSV.exists():
-        df = pd.read_csv(METRICS_CSV)
-    elif DB_PATH.exists():
-        with sqlite3.connect(DB_PATH) as conn:
-            df = pd.read_sql_query(
-                """
-                SELECT term, meaning, search_index,
-                       comment_rate, search_growth, comment_growth
-                FROM daily_metrics
-                WHERE date = (
-                    SELECT MAX(date) FROM daily_metrics
-                )
-                """,
-                conn,
+    for video_id in video_ids:
+        try:
+            comments = fetch_comment_threads(
+                video_id,
+                max_pages=1,
+                max_results=100,
             )
-        if df.empty:
-            df = make_demo_data()
-    else:
-        df = make_demo_data()
 
-    if "term" not in df.columns:
-        raise ValueError("데이터 파일에 term 컬럼이 없습니다.")
+            all_comments.extend(comments)
+            successful_videos += 1
 
-    defaults = {
-        "meaning": "",
-        "search_index": 0,
-        "comment_rate": 0,
-        "search_growth": 0,
-        "comment_growth": 0,
-    }
+            print(
+                f"{video_id}: collected "
+                f"{len(comments)} top-level comments"
+            )
 
-    for col, default in defaults.items():
-        if col not in df.columns:
-            df[col] = default
+        except Exception as exc:
+            print(f"WARNING: video {video_id} failed: {exc}")
 
-    # 2. 최신 댓글 지표를 읽는다.
-    if COMMENT_METRICS_CSV.exists():
-        comments = pd.read_csv(COMMENT_METRICS_CSV)
+    if not all_comments:
+        raise RuntimeError(
+            "댓글을 수집하지 못했습니다. "
+            "영상 공개 여부, API 키, API 할당량을 확인하세요."
+        )
 
-        if (
-            not comments.empty
-            and "term" in comments.columns
-            and "date" in comments.columns
-        ):
-            comments["date"] = comments["date"].astype(str)
-            latest_date = comments["date"].max()
-            latest = comments.loc[
-                comments["date"] == latest_date
-            ].copy()
+    today = datetime.now(timezone.utc).date().isoformat()
+    collected_at = datetime.now(timezone.utc).isoformat(
+        timespec="seconds"
+    )
 
-            # CSV에 이미 계산된 언급률을 사용한다.
-            columns = [
-                col for col in
-                ["term", "comment_rate", "comment_growth"]
-                if col in latest.columns
-            ]
+    # 1. 원본 댓글 저장: 이후 새로운 표현을 발굴하는 데 사용한다.
+    raw_rows = []
 
-            if "term" in columns:
-                latest = latest[columns].drop_duplicates(
-                    subset=["term"], keep="last"
-                )
+    for comment in all_comments:
+        raw_rows.append({
+            "date": today,
+            "video_id": comment.get("video_id", ""),
+            "comment_id": comment.get("comment_id", ""),
+            "published_at": comment.get("published_at", ""),
+            "text": comment.get("text", ""),
+            "collected_at_utc": collected_at,
+        })
 
-                # 기존 댓글 수치를 최신 수집값으로 대체한다.
-                replace_cols = [
-                    col for col in
-                    ["comment_rate", "comment_growth"]
-                    if col in latest.columns
-                ]
+    raw_df = pd.DataFrame(raw_rows)
 
-                df = df.drop(columns=replace_cols, errors="ignore")
-                df = df.merge(latest, on="term", how="left")
+    # 기존 수집 기록을 보존하고 중복 댓글은 제거한다.
+    if RAW_COMMENTS_FILE.exists():
+        old_raw = pd.read_csv(
+            RAW_COMMENTS_FILE,
+            dtype=str,
+            keep_default_na=False,
+        )
+        raw_df = pd.concat(
+            [old_raw, raw_df],
+            ignore_index=True,
+        )
 
-    # 3. 숫자 형식과 누락값을 정리한다.
-    for col in [
-        "search_index",
-        "comment_rate",
-        "search_growth",
-        "comment_growth",
-    ]:
-        if col not in df.columns:
-            df[col] = 0
+    if "comment_id" in raw_df.columns:
+        raw_df = raw_df.drop_duplicates(
+            subset=["comment_id"],
+            keep="last",
+        )
 
-        df[col] = pd.to_numeric(
-            df[col], errors="coerce"
-        ).fillna(0)
+    raw_df.to_csv(
+        RAW_COMMENTS_FILE,
+        index=False,
+        encoding="utf-8-sig",
+    )
 
-    df["term"] = df["term"].fillna("").astype(str)
-    df["meaning"] = df["meaning"].fillna("").astype(str)
-
-    return df.drop_duplicates(subset=["term"], keep="last")
-
-
-def _percentile_score(series):
-    values = pd.to_numeric(series, errors="coerce").fillna(0)
-
-    if values.empty:
-        return pd.Series(index=values.index, dtype=float)
-
-    if values.max() == values.min():
-        return pd.Series(50.0, index=values.index)
-
-    return values.rank(pct=True, method="average") * 100
-
-
-def score_metrics(raw):
-    """검색과 댓글 지표를 정규화해 종합 점수와 티어를 계산한다."""
-    df = raw.copy()
-
-    columns = [
-        "search_index",
-        "comment_rate",
-        "search_growth",
-        "comment_growth",
+    # 2. 기존 유행어 지표도 계속 계산한다.
+    texts = [
+        str(comment.get("text", ""))
+        for comment in all_comments
     ]
+    total = len(texts)
+    rows = []
 
-    for col in columns:
-        if col not in df.columns:
-            df[col] = 0
-        df[col] = pd.to_numeric(
-            df[col], errors="coerce"
-        ).fillna(0)
+    for term in terms:
+        mentions = sum(
+            1 for text in texts
+            if term.casefold() in text.casefold()
+        )
 
-    df["n_search"] = _percentile_score(df["search_index"])
-    df["n_search_growth"] = _percentile_score(df["search_growth"])
-    df["n_comment"] = _percentile_score(df["comment_rate"])
-    df["n_comment_growth"] = _percentile_score(df["comment_growth"])
+        rows.append({
+            "date": today,
+            "term": term,
+            "mentions": mentions,
+            "total_comments": total,
+            "comment_rate": (
+                round(mentions / total * 100, 4)
+                if total else 0.0
+            ),
+            "videos_requested": len(video_ids),
+            "videos_collected": successful_videos,
+            "collected_at_utc": collected_at,
+        })
 
-    df["score"] = (
-        0.35 * df["n_search"]
-        + 0.20 * df["n_search_growth"]
-        + 0.30 * df["n_comment"]
-        + 0.15 * df["n_comment_growth"]
-    ).round(1)
+    current = pd.DataFrame(rows)
 
-    df["momentum"] = (
-        0.5 * df["n_search_growth"]
-        + 0.5 * df["n_comment_growth"]
-    ).round(1)
+    if HISTORY_FILE.exists():
+        history = pd.read_csv(HISTORY_FILE)
+    else:
+        history = pd.DataFrame(
+            columns=current.columns.tolist() + ["comment_growth"]
+        )
 
-    percentile = df["score"].rank(
-        pct=True, ascending=False, method="min"
+    # 이전 수집 결과와 언급률을 비교한다.
+    growth_values = []
+
+    for _, row in current.iterrows():
+        if (
+            not history.empty
+            and {"term", "date", "comment_rate"}.issubset(
+                history.columns
+            )
+        ):
+            previous = history[
+                (history["term"] == row["term"])
+                & (history["date"] < today)
+            ]
+        else:
+            previous = pd.DataFrame()
+
+        if not previous.empty:
+            previous = previous.sort_values("date")
+            growth = (
+                float(row["comment_rate"])
+                - float(previous.iloc[-1]["comment_rate"])
+            )
+            growth_values.append(round(growth, 4))
+        else:
+            growth_values.append(0.0)
+
+    current["comment_growth"] = growth_values
+
+    # 날짜별 기록은 유행어마다 한 행만 유지한다.
+    if not history.empty:
+        combined = pd.concat(
+            [history, current],
+            ignore_index=True,
+            sort=False,
+        )
+    else:
+        combined = current.copy()
+
+    combined = combined.drop_duplicates(
+        subset=["date", "term"],
+        keep="last",
     )
 
-    df["tier"] = np.select(
-        [
-            percentile <= 0.10,
-            percentile <= 0.30,
-            percentile <= 0.70,
-        ],
-        ["S", "A", "B"],
-        default="C",
+    combined.to_csv(
+        HISTORY_FILE,
+        index=False,
+        encoding="utf-8-sig",
+    )
+    current.to_csv(
+        OUTPUT_FILE,
+        index=False,
+        encoding="utf-8-sig",
     )
 
-    has_search = df["search_index"] > 0
-    has_comments = df["comment_rate"] > 0
-
-    df["confidence"] = np.select(
-        [
-            has_search & has_comments,
-            has_comments,
-            has_search,
-        ],
-        [
-            "교차 신호",
-            "댓글 신호",
-            "검색 신호",
-        ],
-        default="데이터 부족",
+    print(
+        f"SUCCESS: {total} comments from "
+        f"{successful_videos}/{len(video_ids)} videos"
     )
+    print(f"Saved raw comments to: {RAW_COMMENTS_FILE}")
+    print(f"Saved metrics to: {OUTPUT_FILE}")
 
-    df = df.sort_values(
-        "score", ascending=False
-    ).reset_index(drop=True)
 
-    df["rank"] = np.arange(1, len(df) + 1)
-
-    return df
+if __name__ == "__main__":
+    main()
